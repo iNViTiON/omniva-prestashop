@@ -1,3 +1,12 @@
+= 2.3.5 =
+# Added
+- PrestaShop 9.x compatibility:
+  - Updated ps_versions_compliancy max version to 9.99.99
+  - Removed deprecated hooks (header, orderDetailDisplayed) that were removed in PS 9.x
+  - Added isPs9() helper method for PS 9.x version detection
+  - Added inline JS loading in admin order block for PS 9.x Symfony-based order pages
+  - Added upgrade script to unregister removed hooks from existing installs
+
 = 2.3.4 =
 # Fixed
 - Fixed so that the sender's details would be taken from the shop specified in the order (fix for multi shop)

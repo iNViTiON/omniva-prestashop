@@ -66,9 +66,7 @@ class OmnivaltShipping extends CarrierModule
         'displayBeforeCarrier',
         'displayAdminProductsExtra',
         'actionProductUpdate',
-        'header',
         'displayHeader',
-        'orderDetailDisplayed',
         'displayAdminOrder',
         'displayBackOfficeHeader',
         'actionValidateOrder',
@@ -93,10 +91,10 @@ class OmnivaltShipping extends CarrierModule
     {
         $this->name = 'omnivaltshipping';
         $this->tab = 'shipping_logistics';
-        $this->version = '2.3.4';
+        $this->version = '2.3.5';
         $this->author = 'Mijora';
         $this->need_instance = 0;
-        $this->ps_versions_compliancy = array('min' => '1.6', 'max' => _PS_VERSION_);
+        $this->ps_versions_compliancy = array('min' => '1.6', 'max' => '9.99.99');
         $this->bootstrap = true;
 
         parent::__construct();
@@ -436,6 +434,11 @@ class OmnivaltShipping extends CarrierModule
     public function isPs177()
     {
         return version_compare(_PS_VERSION_, '1.7.7', '>=');
+    }
+
+    public function isPs9()
+    {
+        return version_compare(_PS_VERSION_, '9.0.0', '>=');
     }
 
     public function getOrderShippingCost($params, $shipping_cost)
@@ -1464,7 +1467,7 @@ class OmnivaltShipping extends CarrierModule
 
     public function hookActionAdminControllerSetMedia()
     {
-        if (get_class($this->context->controller) == 'AdminOrdersController' || get_class($this->context->controller) == 'AdminLegacyLayoutControllerCore'
+        if (get_class($this->context->controller) == 'AdminOrdersController'
             || (isset($this->context->controller->module) && $this->context->controller->module == $this) || Tools::getValue('configure') == $this->name) {
                 Media::addJsDef([
                     'omnivalt_bulk_labels' => $this->l("Print Omnivalt labels"),
@@ -1665,7 +1668,36 @@ class OmnivaltShipping extends CarrierModule
                 'orderHistory' => OmnivaOrderHistory::getHistoryByOrder($omnivaOrder->id),
             ));
 
-            return $this->display(__FILE__, $omniva_tpl);
+            $html = $this->display(__FILE__, $omniva_tpl);
+
+            // In PS 9.x, actionAdminControllerSetMedia is not fired for Symfony-based admin pages,
+            // so we load the necessary JS variables and scripts inline.
+            if ($this->isPs9()) {
+                $js_vars = array(
+                    // isPs177() always returns true for PS 9.x since 9.0.0 >= 1.7.7
+                    'omnivaltIsPS177Plus' => $this->isPs177(),
+                    'printLabelsUrl' => $this->context->link->getAdminLink(self::CONTROLLER_OMNIVA_AJAX) . '&action=generateLabels',
+                    'moduleUrl' => $this->context->link->getAdminLink(self::CONTROLLER_OMNIVA_AJAX) . '&action=saveOrderInfo',
+                    'omnivalt_terminal_carrier' => OmnivaCarrier::getId('omnivalt_pt'),
+                    'omnivalt_methods' => OmnivaCarrier::getAllMethodsData(),
+                    'omnivalt_text' => array(
+                        'ajax_parsererror' => $this->l('An invalid response was received'),
+                        'ajax_unknownerror' => $this->l('Unknown error'),
+                        'save_success' => $this->l('Successfully saved'),
+                    ),
+                );
+                // Use JSON_HEX_TAG to prevent </script> injection in JSON values
+                $inline_js = '<script>if (typeof omnivaltIsPS177Plus === "undefined") {';
+                foreach ($js_vars as $key => $val) {
+                    $inline_js .= 'var ' . $key . ' = ' . json_encode($val, JSON_HEX_TAG) . ';';
+                }
+                $inline_js .= '}</script>';
+                $inline_js .= '<script src="' . htmlspecialchars($this->_path . 'views/js/adminOmnivalt.js') . '"></script>';
+                $inline_js .= '<script src="' . htmlspecialchars($this->_path . 'views/js/omniva-admin-order-177.js') . '"></script>';
+                $html = $inline_js . $html;
+            }
+
+            return $html;
         }
     }
 
