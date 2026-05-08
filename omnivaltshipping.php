@@ -447,15 +447,19 @@ class OmnivaltShipping extends CarrierModule
             $omniva_references[$key] = (int) OmnivaCarrier::getReference($key);
         }
 
-        if (isset($this->context->cart->id_address_delivery)) {
-            $address = new Address($this->context->cart->id_address_delivery);
+        $id_address_delivery = (isset($params->id_address_delivery) && (int) $params->id_address_delivery > 0)
+            ? (int) $params->id_address_delivery
+            : (isset($this->context->cart->id_address_delivery) ? (int) $this->context->cart->id_address_delivery : 0);
+
+        if ($id_address_delivery > 0) {
+            $address = new Address($id_address_delivery);
 
             $shipment_codes = $this->api->getShipmentCodes($carrier->id);
             $shipment_keys = array(
                 'type' => $shipment_codes->type_key,
                 'channel' => $shipment_codes->channel_key
             );
-            
+
             $default_iso_code = Configuration::get('omnivalt_default_receiver_countrycode');
             if (!$default_iso_code) $default_iso_code = $this->context->language->iso_code;
             $iso_code = $address->id_country ? Country::getIsoById($address->id_country) : $default_iso_code;
@@ -500,7 +504,33 @@ class OmnivaltShipping extends CarrierModule
 
     public function getOrderShippingCostExternal($params)
     {
-        return $this->getOrderShippingCost($params, 0);
+        $carrier = new Carrier((int) $this->id_carrier);
+
+        $id_address = isset($params->id_address_delivery) ? (int) $params->id_address_delivery : 0;
+        $id_zone = $id_address
+            ? (int) Address::getZoneById($id_address)
+            : (int) Country::getIdZone((int) Configuration::get('PS_COUNTRY_DEFAULT'));
+        $id_currency = isset($params->id_currency)
+            ? (int) $params->id_currency
+            : (int) Configuration::get('PS_CURRENCY_DEFAULT');
+
+        if ((int) $carrier->getShippingMethod() === Carrier::SHIPPING_METHOD_WEIGHT) {
+            $shipping_cost = (float) Carrier::getDeliveryPriceByWeight(
+                $carrier->id,
+                (float) $params->getTotalWeight(),
+                $id_zone
+            );
+        } else {
+            $total = (float) $params->getOrderTotal(true, Cart::BOTH_WITHOUT_SHIPPING);
+            $shipping_cost = (float) Carrier::getDeliveryPriceByPrice(
+                $carrier->id,
+                $total,
+                $id_zone,
+                $id_currency
+            );
+        }
+
+        return $this->getOrderShippingCost($params, $shipping_cost);
     }
 
     public function hookUpdateCarrier($params)
@@ -1835,6 +1865,10 @@ class OmnivaltShipping extends CarrierModule
     public function hookActionValidateOrder($params)
     {
         $order = $params['order'];
+        $cart = isset($params['cart']) ? $params['cart'] : new Cart((int) $order->id_cart);
+
+        $this->recoverOmnivaCarrierIfMissing($order, $cart);
+
         $carrier = new Carrier($order->id_carrier);
         if($carrier->external_module_name == $this->name)
         {
@@ -1863,6 +1897,54 @@ class OmnivaltShipping extends CarrierModule
             $omnivaOrderHistory->manifest = 0;
             $omnivaOrderHistory->add();
         }
+    }
+
+    /**
+     * Defensive recovery: when PaymentModule::validateOrder leaves order with id_carrier=0
+     * (e.g. payment-module callback context where Cart::getPackageList drops the carrier),
+     * but the cart had an Omniva carrier selected, restore the carrier on the order,
+     * recompute shipping totals from the cart, and create the missing order_carrier row.
+     */
+    protected function recoverOmnivaCarrierIfMissing($order, $cart)
+    {
+        if ((int) $order->id_carrier !== 0) {
+            return;
+        }
+        if (! Validate::isLoadedObject($cart) || (int) $cart->id_carrier === 0) {
+            return;
+        }
+
+        $cart_carrier = new Carrier((int) $cart->id_carrier);
+        if (! Validate::isLoadedObject($cart_carrier) || $cart_carrier->external_module_name !== $this->name) {
+            return;
+        }
+
+        $shipping_tax_excl = (float) $cart->getPackageShippingCost($cart_carrier->id, false);
+        $shipping_tax_incl = (float) $cart->getPackageShippingCost($cart_carrier->id, true);
+
+        $order->id_carrier = (int) $cart_carrier->id;
+        $order->total_shipping_tax_excl = $shipping_tax_excl;
+        $order->total_shipping_tax_incl = $shipping_tax_incl;
+        $order->total_shipping = $shipping_tax_incl;
+        $order->total_paid_tax_excl += $shipping_tax_excl;
+        $order->total_paid_tax_incl += $shipping_tax_incl;
+        $order->total_paid = $order->total_paid_tax_incl;
+        $order->update();
+
+        $order_carrier = new OrderCarrier();
+        $order_carrier->id_order = (int) $order->id;
+        $order_carrier->id_carrier = (int) $cart_carrier->id;
+        $order_carrier->weight = (float) $order->getTotalWeight();
+        $order_carrier->shipping_cost_tax_excl = $shipping_tax_excl;
+        $order_carrier->shipping_cost_tax_incl = $shipping_tax_incl;
+        $order_carrier->add();
+
+        OmnivaHelper::printToLog(
+            'Cart #' . $order->id_cart . ' Order #' . $order->id
+                . '. Recovered Omniva carrier #' . $cart_carrier->id
+                . ' (was 0); shipping=' . $shipping_tax_incl,
+            'order'
+        );
     }
 
     /**
